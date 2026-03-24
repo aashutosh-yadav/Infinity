@@ -1,8 +1,10 @@
 <!DOCTYPE html>
 <html>
+
 <head>
     <title>URL Shortener</title>
 </head>
+
 <body>
 
     <h2>Simple URL Shortener</h2>
@@ -11,27 +13,45 @@
     <button onclick="shortenUrl()">Shorten</button>
 
     <p id="result"></p>
-
     <script>
         async function shortenUrl() {
-            const longUrl = document.getElementById("longUrl").value;
+            const longUrl = document.getElementById("longUrl").value.trim();
 
-            const response = await fetch("http://127.0.0.1:8000/shorten", {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json"
-                },
-                body: JSON.stringify({ long_url: longUrl })
-            });
+            // 🔴 Frontend validation
+            if (!longUrl) {
+                alert("Please enter a URL");
+                return;
+            }
 
-            const data = await response.json();
+            try {
+                const response = await fetch("http://127.0.0.1:8000/shorten", {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify({ long_url: longUrl })
+                });
 
-            const shortUrl = "http://127.0.0.1:8000/" + data.short_code;
+                // 🔴 Handle backend errors
+                if (!response.ok) {
+                    const err = await response.json();
+                    alert(err.detail || "Something went wrong");
+                    return;
+                }
 
-            document.getElementById("result").innerHTML =
-                `<a href="${shortUrl}" target="_blank">${shortUrl}</a>`;
+                const data = await response.json();
+
+                const shortUrl = "http://127.0.0.1:8000/" + data.short_code;
+
+                document.getElementById("result").innerHTML =
+                    `Short URL: <a href="${shortUrl}" target="_blank">${shortUrl}</a>`;
+            } catch (error) {
+                alert("Server not reachable");
+            }
         }
     </script>
 
+
 </body>
+
 </html>
