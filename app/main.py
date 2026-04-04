@@ -22,6 +22,7 @@ def get_db():
 @app.post("/shorten", response_model=schemas.URLResponse)
 def shorten_url(url: schemas.URLCreate, db: Session = Depends(get_db)):
     # Check if URL already exists
+    # if the url alrady exits then return the same short code previously generated and dont generate new code for the smae url repetatively .
     existing_url = db.query(models.URL).filter(models.URL.long_url == url.long_url).first()
     if existing_url:
         return existing_url
