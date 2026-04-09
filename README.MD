@@ -586,60 +586,6 @@ Grafana dashboard (http://localhost:3000) tracks:
 ---
 
 ## Project Structure
-
-```
-url-shortener/
-├── app/
-│   ├── main.py                  # FastAPI entrypoint
-│   ├── config.py                # settings, env vars
-│   │
-│   ├── api/
-│   │   └── routes/
-│   │       ├── urls.py          # POST /shorten, GET /{code}
-│   │       ├── analytics.py     # GET /analytics/{code}
-│   │       └── auth.py          # login, register
-│   │
-│   ├── core/
-│   │   ├── snowflake.py         # Snowflake ID generator
-│   │   ├── base62.py            # ID → short code encoding
-│   │   └── lru_cache.py         # in-process LRU implementation
-│   │
-│   ├── cache/
-│   │   ├── layers.py            # L1 + L2 lookup logic
-│   │   ├── redis.py             # Redis client
-│   │   └── consistent_hash.py   # consistent hashing ring
-│   │
-│   ├── db/
-│   │   ├── database.py          # async SQLAlchemy setup
-│   │   ├── models.py            # ORM models
-│   │   └── repositories/
-│   │       ├── urls.py          # URL DB queries
-│   │       └── analytics.py     # analytics DB queries
-│   │
-│   ├── workers/
-│   │   └── analytics.py         # background click aggregator
-│   │
-│   └── schemas/
-│       ├── urls.py              # request/response schemas
-│       └── analytics.py
-│
-├── tests/
-│   ├── unit/                    # snowflake, lru, consistent hash
-│   ├── integration/             # API + DB tests
-│   └── load/                    # Locust scenarios
-│
-├── monitoring/
-│   ├── prometheus.yml
-│   └── grafana/
-│       └── dashboard.json
-│
-├── SYSTEM_DESIGN.md             # deep dive on every decision
-├── Dockerfile
-├── docker-compose.yml
-├── alembic.ini
-└── requirements.txt
-```
-
 ---
 
 ## What I Learned
@@ -655,3 +601,7 @@ This project was intentionally scoped to go deep rather than wide. The engineeri
 ---
 
 *Built with the goal of solving real engineering problems, not shipping features.*
+
+--------------------
+
+Your project covers the core backend fundamentals really well. The one gap vs current YC demand is AI/LLM integration — even adding a simple feature (e.g., AI-generated short code suggestions, or an LLM-powered analytics summary) would make the project more relevant to where YC companies are hiring right now.

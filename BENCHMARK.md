@@ -6,6 +6,7 @@ Performance benchmarks for the URL shortener service. All tests run locally agai
 
 ## Baseline — DB Lookup (No Cache)
 
+This is all for the realational database because we are using postgress.(just for MVP , not considerd scalling). 
 Redirect resolution hitting the database directly via B-tree index. No in-memory caching layer.
 
 **Tool:** [`hey`](https://github.com/rakyll/hey)  
