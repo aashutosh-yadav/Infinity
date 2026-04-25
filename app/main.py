@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Depends, HTTPException
 from sqlalchemy.orm import Session
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse,FileResponse
+from fastapi.middleware.cors import CORSMiddleware
 
 from .database import SessionLocal, engine
 from . import models, schemas, utils
@@ -8,6 +9,15 @@ from . import models, schemas, utils
 models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
+
+# CORS conf (has to be changed)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],    # allow any domanin (risky)
+    allow_credentials=True, # auth
+    allow_methods=["*"],    # http methods
+    allow_headers=["*"],    # allow headers
+)
 
 # Dependency
 def get_db():
@@ -17,6 +27,12 @@ def get_db():
     finally:
         db.close()
 
+
+#root 
+@app.get("/")
+def serve_frontend():
+    return FileResponse("app/frontend/index.html")
+    
 
 # Create short URL
 @app.post("/shorten", response_model=schemas.URLResponse)
