@@ -5,6 +5,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .database import SessionLocal, engine
 from . import models, schemas, utils
+from .redis_client import redis_client
+
 
 models.Base.metadata.create_all(bind=engine)
 
@@ -56,9 +58,23 @@ def shorten_url(url: schemas.URLCreate, db: Session = Depends(get_db)):
 # Redirect to original URL
 @app.get("/{short_code}")
 def redirect_url(short_code: str, db: Session = Depends(get_db)):
+
+    # 1 Try cache (Fast path)
+    try : 
+        cached_url = redis_client.get(short_code)
+    except:
+        cached_url = None # fallback safty 
+
+    # 2. fallback to db 
     db_url = db.query(models.URL).filter(models.URL.short_code == short_code).first()
 
     if not db_url:
         raise HTTPException(status_code=404, detail="URL not found")
+
+    # 3. cache after read (lazy aching)
+    try : 
+        redis_client.set(short_code , db_url.long_url , ex=3600)
+    except:
+        pass # never let cache break you app 
 
     return RedirectResponse(db_url.long_url)
