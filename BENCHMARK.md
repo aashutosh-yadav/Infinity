@@ -75,3 +75,18 @@ hey -n 5000 -c 100 -disable-redirects http://127.0.0.1:8000/orAXTk
 | Cache + DB fallback               | ⬜ Pending   |
 | Write path (`/shorten`) load test | ⬜ Pending   |
 | Distributed load (multi-node)     | ⬜ Pending   |
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
