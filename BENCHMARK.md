@@ -212,12 +212,179 @@ hey -n 5000 -c 100 -disable-redirects http://127.0.0.1:8000/4FmAo3
 
 
 
+# Redis Caching — Benchmark & Performance Analysis
 
+---
 
+## 📊 Test Setup
 
+* Tool: `hey`
+* Endpoint: `/ {short_code}` (redirect)
+* Redirects disabled
+* Environment:
 
+  * FastAPI + Uvicorn (4 workers)
+  * PostgreSQL (local)
+  * Redis (local)
+* Load: 5000 requests, concurrency = 100
 
+---
 
+# 🚀 Baseline — Without Redis
 
+| Metric      | Value   |
+| ----------- | ------- |
+| RPS         | ~1919   |
+| Avg Latency | ~49 ms  |
+| p50         | ~47 ms  |
+| p95         | ~80 ms  |
+| p99         | ~115 ms |
 
+### Observations
 
+* High throughput and low latency
+* Tight latency distribution (low variance)
+* Database lookups are already very fast
+* No significant queuing under this load
+
+---
+
+# ⚠️ Redis (Cold Cache)
+
+| Metric      | Value   |
+| ----------- | ------- |
+| RPS         | ~1323   |
+| Avg Latency | ~66 ms  |
+| p99         | ~339 ms |
+
+### Observations
+
+* Performance degraded compared to baseline
+* High tail latency due to cache misses
+* Requests hit database + Redis simultaneously
+* Initial cache population adds overhead
+
+---
+
+# ✅ Redis (Warm Cache)
+
+| Metric      | Value       |
+| ----------- | ----------- |
+| RPS         | ~1500–1650  |
+| Avg Latency | ~57–61 ms   |
+| p50         | ~52–58 ms   |
+| p95         | ~85–112 ms  |
+| p99         | ~125–150 ms |
+
+### Observations
+
+* Performance stabilized after cache warm-up
+* Majority of requests served from Redis
+* Reduced variance compared to cold cache
+* Slight improvement over cold cache, but still below baseline
+
+---
+
+# 📈 Comparative Summary
+
+| Scenario     | RPS   | Avg Latency | p99     |
+| ------------ | ----- | ----------- | ------- |
+| No Redis     | ~1919 | ~49 ms      | ~115 ms |
+| Redis (Cold) | ~1323 | ~66 ms      | ~339 ms |
+| Redis (Warm) | ~1550 | ~58 ms      | ~130 ms |
+
+---
+
+# 🧠 Key Insights
+
+## 1. Database is not the bottleneck
+
+* Indexed lookups in PostgreSQL are extremely fast
+* Local deployment minimizes latency
+* Caching does not significantly reduce response time
+
+---
+
+## 2. Redis introduces overhead
+
+Each request adds:
+
+* Additional network call (even on localhost)
+* Serialization/deserialization cost
+* Extra system calls
+
+Result:
+
+* Slight increase in latency
+* Reduction in throughput
+
+---
+
+## 3. Cold cache is significantly worse
+
+* Cache misses trigger both Redis and DB operations
+* Leads to higher latency and tail spikes
+* Initial requests suffer the most
+
+---
+
+## 4. Warm cache stabilizes performance
+
+* High cache hit rate reduces DB usage
+* Latency becomes more consistent
+* Tail latency improves compared to cold cache
+
+---
+
+## 5. Redis does not improve performance in this setup
+
+Because:
+
+* Single-node architecture
+* Local database with low latency
+* Small dataset and simple queries
+
+Conclusion:
+
+> Redis is not beneficial when the database is already fast and not under load.
+
+---
+
+## 6. Primary bottleneck is worker/CPU capacity
+
+From previous experiments:
+
+* Increasing workers significantly improved performance
+* High concurrency leads to queueing, not DB slowdown
+
+---
+
+# ⚖️ Final Conclusion
+
+* Redis caching is correctly implemented but **not required at current scale**
+* It introduces additional overhead without meaningful gains
+* Performance optimization should focus on:
+
+  * worker scaling
+  * concurrency handling
+  * CPU utilization
+
+---
+
+# 🚀 When Redis becomes useful
+
+Redis will provide clear benefits when:
+
+* Database is remote (network latency increases)
+* Database becomes CPU-bound
+* Read traffic is very high (10k+ RPS)
+* Multiple application instances are deployed
+* Query complexity increases
+
+---
+
+# 🧠 Final Takeaway
+
+> Performance optimizations must be driven by measured bottlenecks, not assumptions.
+
+Redis is a powerful tool, but its effectiveness depends entirely on system context.
