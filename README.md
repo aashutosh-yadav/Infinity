@@ -4,6 +4,10 @@ A production-inspired, read-heavy URL shortener built using **FastAPI, PostgreSQ
 
 ---
 
+⚠️ This project is built as an engineering exploration, not a feature-driven product. The goal is to understand real-world system behavior through benchmarking, bottleneck analysis, and iterative optimization rather than just adding features.
+
+---
+
 ## ✨ Features
 
 * ⚡ High-performance redirect service (~1900 RPS under load)
