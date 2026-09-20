@@ -28,3 +28,7 @@ dist/
 
 # 🔹 SQLite DB (if you create one later)
 *.db
+
+# Go
+go/infinity-go
+go/go.sum

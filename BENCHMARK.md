@@ -2,14 +2,16 @@
 
 Performance benchmarks for the URL shortener service. All tests run locally against `http://127.0.0.1:8000`.
 
+> **Update note:** the original Redis section of this document (further below) concluded Redis was not beneficial at this scale. That conclusion was based on a benchmark run against a version of the code with a caching bug — the redirect handler read from Redis but never checked the result before falling through to Postgres, so "Redis (Warm)" numbers below were actually measuring Postgres + a wasted Redis round-trip, not an actual cache hit. The bug has been fixed; corrected numbers are in the **"Redis — Corrected Results"** section near the end. The original sections are left intact below for the historical record, since the reasoning in them was sound given the (broken) data available at the time.
+
 ---
 
 ## Baseline — DB Lookup (No Cache)
 
-This is all for the realational database because we are using postgress.(just for MVP , not considerd scalling). 
+This is all for the relational database because we are using Postgres (just for MVP, not considered for scaling).
 Redirect resolution hitting the database directly via B-tree index. No in-memory caching layer.
 
-**Tool:** [`hey`](https://github.com/rakyll/hey)  
+**Tool:** [`hey`](https://github.com/rakyll/hey)
 **Command:**
 ```
 hey -n 5000 -c 100 -disable-redirects http://127.0.0.1:8000/orAXTk
@@ -66,7 +68,6 @@ hey -n 5000 -c 100 -disable-redirects http://127.0.0.1:8000/orAXTk
 
 ---
 
-
 ## Multi-Worker Benchmark — 4 Workers
 
 ### Setup
@@ -75,7 +76,7 @@ hey -n 5000 -c 100 -disable-redirects http://127.0.0.1:8000/orAXTk
 * Workers: 4
 * Database: PostgreSQL (local)
 * Test Tool: hey
-* Endpoint: `/ {short_code}` (redirect)
+* Endpoint: `/{short_code}` (redirect)
 * Redirects disabled to measure backend latency only
 
 **Command:**
@@ -83,8 +84,6 @@ hey -n 5000 -c 100 -disable-redirects http://127.0.0.1:8000/orAXTk
 ```
 hey -n 5000 -c 100 -disable-redirects http://127.0.0.1:8000/4FmAo3
 ```
-
----
 
 ### Results
 
@@ -102,8 +101,6 @@ hey -n 5000 -c 100 -disable-redirects http://127.0.0.1:8000/4FmAo3
 | Slowest        | 175.4 ms    |
 | Status         | 307 ✓ (all) |
 
----
-
 ### Latency Distribution
 
 ```
@@ -120,8 +117,6 @@ hey -n 5000 -c 100 -disable-redirects http://127.0.0.1:8000/4FmAo3
 0.175 [8]     |
 ```
 
----
-
 ### Observations
 
 * Significant performance improvement compared to single-worker setup
@@ -130,8 +125,6 @@ hey -n 5000 -c 100 -disable-redirects http://127.0.0.1:8000/4FmAo3
 * Tail latency (p99) reduced drastically (~650ms → ~115ms)
 * Latency distribution is tight with minimal long-tail behavior
 
----
-
 ### Analysis
 
 * The primary bottleneck in the baseline system was **worker contention**, not database performance
@@ -139,15 +132,11 @@ hey -n 5000 -c 100 -disable-redirects http://127.0.0.1:8000/4FmAo3
 * Database lookups are fast and not yet a limiting factor under current load
 * System demonstrates good scaling behavior with increased concurrency
 
----
-
 ### Conclusion
 
 * Multi-worker configuration significantly improves system performance
 * Current architecture (FastAPI + PostgreSQL) is sufficient for moderate traffic (~2k RPS)
-* Introducing Redis at this stage would be a **premature optimization**
-
----
+* ~~Introducing Redis at this stage would be a **premature optimization**~~ — see "Redis — Corrected Results" below; this conclusion was based on a broken cache implementation.
 
 ### Next Steps
 
@@ -156,19 +145,20 @@ hey -n 5000 -c 100 -disable-redirects http://127.0.0.1:8000/4FmAo3
 * Benchmark write-heavy workloads (`/shorten`)
 * Introduce Redis caching when database becomes a bottleneck
 
-### Problem with workers 
+### Problem with workers
 
-* Memory 
+* Memory
   4 workers → 4x memory usage
 
-* DB connections 
-  4 workers → multiple DB connections  
+* DB connections
+  4 workers → multiple DB connections
 
-* CPU limit 
-  4 CPU cores → ideal ≈ 4 workers  
+* CPU limit
+  4 CPU cores → ideal ≈ 4 workers (this machine actually has **8 cores** — see worker-scaling section below, this assumption undercounted available capacity)
 
-* Workers dont make you app faster they make it more capable of handling multiple requests simultaneously .
+* Workers dont make you app faster they make it more capable of handling multiple requests simultaneously.
 
+---
 
 ## High Concurrency Stress Test — c=500
 
@@ -180,16 +170,12 @@ hey -n 5000 -c 100 -disable-redirects http://127.0.0.1:8000/4FmAo3
 | Avg Latency | ~339 ms |
 | p99         | ~881 ms |
 
----
-
 ### Observations
 
 * Throughput decreased significantly compared to lower concurrency levels
 * Average latency increased ~5x compared to c=200
 * Tail latency (p99) exceeded 800ms, indicating severe queueing
 * Response wait time dominates total latency, suggesting request backlog
-
----
 
 ### Analysis
 
@@ -198,39 +184,31 @@ hey -n 5000 -c 100 -disable-redirects http://127.0.0.1:8000/4FmAo3
 * CPU/worker capacity is the primary bottleneck
 * Database is not the limiting factor at this stage
 
----
-
 ### Conclusion
 
 * Optimal operating range: ~200–250 concurrent users (~2500 RPS)
 * Beyond this point, performance degrades due to worker saturation
 * Scaling requires:
-
   * increasing worker count
   * adding CPU resources
   * or horizontal scaling across multiple instances
 
-
-
-# Redis Caching — Benchmark & Performance Analysis
-
 ---
+
+# Redis Caching — Original Benchmark & Analysis (superseded — see corrected results below)
 
 ## 📊 Test Setup
 
 * Tool: `hey`
-* Endpoint: `/ {short_code}` (redirect)
+* Endpoint: `/{short_code}` (redirect)
 * Redirects disabled
 * Environment:
-
   * FastAPI + Uvicorn (4 workers)
   * PostgreSQL (local)
   * Redis (local)
 * Load: 5000 requests, concurrency = 100
 
----
-
-# 🚀 Baseline — Without Redis
+## 🚀 Baseline — Without Redis
 
 | Metric      | Value   |
 | ----------- | ------- |
@@ -240,16 +218,7 @@ hey -n 5000 -c 100 -disable-redirects http://127.0.0.1:8000/4FmAo3
 | p95         | ~80 ms  |
 | p99         | ~115 ms |
 
-### Observations
-
-* High throughput and low latency
-* Tight latency distribution (low variance)
-* Database lookups are already very fast
-* No significant queuing under this load
-
----
-
-# ⚠️ Redis (Cold Cache)
+## ⚠️ Redis (Cold Cache) — measured against the buggy cache implementation
 
 | Metric      | Value   |
 | ----------- | ------- |
@@ -257,35 +226,15 @@ hey -n 5000 -c 100 -disable-redirects http://127.0.0.1:8000/4FmAo3
 | Avg Latency | ~66 ms  |
 | p99         | ~339 ms |
 
-### Observations
-
-* Performance degraded compared to baseline
-* High tail latency due to cache misses
-* Requests hit database + Redis simultaneously
-* Initial cache population adds overhead
-
----
-
-# ✅ Redis (Warm Cache)
+## ✅ Redis (Warm Cache) — measured against the buggy cache implementation
 
 | Metric      | Value       |
 | ----------- | ----------- |
 | RPS         | ~1500–1650  |
 | Avg Latency | ~57–61 ms   |
-| p50         | ~52–58 ms   |
-| p95         | ~85–112 ms  |
 | p99         | ~125–150 ms |
 
-### Observations
-
-* Performance stabilized after cache warm-up
-* Majority of requests served from Redis
-* Reduced variance compared to cold cache
-* Slight improvement over cold cache, but still below baseline
-
----
-
-# 📈 Comparative Summary
+## 📈 Comparative Summary (original, pre-fix)
 
 | Scenario     | RPS   | Avg Latency | p99     |
 | ------------ | ----- | ----------- | ------- |
@@ -293,98 +242,113 @@ hey -n 5000 -c 100 -disable-redirects http://127.0.0.1:8000/4FmAo3
 | Redis (Cold) | ~1323 | ~66 ms      | ~339 ms |
 | Redis (Warm) | ~1550 | ~58 ms      | ~130 ms |
 
----
-
-# 🧠 Key Insights
-
-## 1. Database is not the bottleneck
-
-* Indexed lookups in PostgreSQL are extremely fast
-* Local deployment minimizes latency
-* Caching does not significantly reduce response time
+**Why these numbers were misleading:** the redirect handler fetched `cached_url` from Redis but never branched on it — every request, cache hit or not, fell through to a full Postgres query regardless. So "Redis (Warm)" above wasn't measuring a cache hit; it was measuring Postgres query time *plus* a wasted Redis round-trip on top of it, which is exactly why it came in slower than the no-cache baseline. The conclusions below ("Redis introduces overhead," "not beneficial in this setup") were reasonable given this data — the data itself just wasn't measuring what it claimed to.
 
 ---
 
-## 2. Redis introduces overhead
+# Redis — Corrected Results (post cache-fix)
 
-Each request adds:
+## The Bug
 
-* Additional network call (even on localhost)
-* Serialization/deserialization cost
-* Extra system calls
+```python
+# Before (bug): cached_url fetched but never used
+cached_url = redis_client.get(short_code)
+db_url = db.query(models.URL).filter(models.URL.short_code == short_code).first()
+...
 
-Result:
+# After (fix): cache hit short-circuits before the DB is ever touched
+cached_url = redis_client.get(short_code)
+if cached_url:
+    return RedirectResponse(cached_url)
+db_url = db.query(models.URL).filter(models.URL.short_code == short_code).first()
+```
 
-* Slight increase in latency
-* Reduction in throughput
+## Results — 4 Workers, c=100
 
----
+| Run              | RPS   | Avg Latency | p99     |
+| ----------------- | ----- | ----------- | ------- |
+| Cold (`FLUSHALL` before run) | ~6,303 | ~15.5 ms | ~28 ms |
+| Warm (immediate re-run)      | ~6,421 | ~15.2 ms | ~25 ms |
 
-## 3. Cold cache is significantly worse
+Cold and warm come out nearly identical — not because caching doesn't matter, but because `FLUSHALL` only empties Redis *before* the run starts. Under `c=100` concurrency, the very first request repopulates the cache almost instantly, so by request #2 the "cold" run is already >99% warm-cache traffic. This isn't a controlled cold-vs-warm comparison; both runs are effectively warm-cache throughput.
 
-* Cache misses trigger both Redis and DB operations
-* Leads to higher latency and tail spikes
-* Initial requests suffer the most
+**Actual before/after (same 4-worker, c=100 config):**
 
----
+| Metric      | Pre-fix ("Redis Warm") | Post-fix |
+| ----------- | ----------------------- | -------- |
+| RPS         | ~1,550                  | **~6,400** |
+| Avg Latency | ~58 ms                  | **~15 ms** |
+| p99         | ~130 ms                 | **~25 ms** |
 
-## 4. Warm cache stabilizes performance
+Roughly a **4x throughput increase** once the cache was actually being used.
 
-* High cache hit rate reduces DB usage
-* Latency becomes more consistent
-* Tail latency improves compared to cold cache
+## Why the original "Redis doesn't help" conclusion still has a grain of truth
 
----
-
-## 5. Redis does not improve performance in this setup
-
-Because:
-
-* Single-node architecture
-* Local database with low latency
-* Small dataset and simple queries
-
-Conclusion:
-
-> Redis is not beneficial when the database is already fast and not under load.
+Even now, on a local, indexed Postgres instance, the *absolute* gap between a cache hit and a cache miss on this machine is small in wall-clock terms — a local indexed lookup is already fast. The bug masked the real comparison entirely, but the original insight that "Redis matters more under network latency to a remote DB, or DB load under sustained traffic, than on a quiet local Postgres" is still directionally correct — it just wasn't actually being tested by the original benchmark.
 
 ---
 
-## 6. Primary bottleneck is worker/CPU capacity
+# Concurrency Sweep (post cache-fix, 4 workers)
 
-From previous experiments:
+| Concurrency | RPS   | Avg Latency | p99     | Completed |
+| ----------- | ----- | ------------| ------- | --------- |
+| 100         | 6,562 | 14.5 ms     | 21.9 ms | 5000/5000 |
+| 150         | 6,331 | 23.1 ms     | 39.9 ms | 4950/5000* |
+| 160         | 6,316 | 24.2 ms     | 48.6 ms | 4960/5000* |
+| 250         | 6,294 | 37.4 ms     | 113.7 ms| 5000/5000 |
+| 300         | 5,832 | 46.8 ms     | 178.7 ms| 4800/5000* |
+| 400         | 5,905 | 59.0 ms     | 234.0 ms| 4800/5000* |
+| 500         | ~983  | ~339 ms     | ~881 ms | —         |
 
-* Increasing workers significantly improved performance
-* High concurrency leads to queueing, not DB slowdown
+\* See "Note on incomplete-looking results" below — these are not actual dropped requests.
 
----
-
-# ⚖️ Final Conclusion
-
-* Redis caching is correctly implemented but **not required at current scale**
-* It introduces additional overhead without meaningful gains
-* Performance optimization should focus on:
-
-  * worker scaling
-  * concurrency handling
-  * CPU utilization
+**Finding:** throughput stays flat (~6,300–6,500 RPS) from c=100 through c=250, with latency climbing steadily rather than staying flat — the signature of a system already saturated around c=100, not one with clean headroom up to a specific thread count. A hypothesis that the 4-worker × 40-thread default (160 total thread capacity) would produce a sharp cliff exactly at c=160 did not hold — no cliff appears there. The real, sharp collapse happens somewhere between c=400 and c=500, not yet narrowed further.
 
 ---
 
-# 🚀 When Redis becomes useful
+# Worker Scaling — 4 vs 8 Workers
 
-Redis will provide clear benefits when:
+Machine has **8 CPU cores** (`nproc`); original benchmarks above were run with only 4 workers.
 
-* Database is remote (network latency increases)
-* Database becomes CPU-bound
-* Read traffic is very high (10k+ RPS)
-* Multiple application instances are deployed
-* Query complexity increases
+## Baseline (c=100)
+
+| Workers | RPS    | Avg Latency | p99     |
+| ------- | ------ | ------------| ------- |
+| 4       | 6,562  | 14.5 ms     | 21.9 ms |
+| 8       | ~8,300 | ~11.2 ms    | ~22.8 ms|
+
+~27% throughput increase from matching worker count to core count, confirmed across repeated runs (8,321 / 8,250 req/sec). This confirms throughput at c=100 was partly CPU/worker-bound, not purely capped by thread-pool size — if it were purely thread-bound, adding workers wouldn't have moved a number already well under the old 160-thread ceiling.
+
+## Higher concurrency, 8 workers
+
+| Concurrency | RPS (4 workers) | RPS (8 workers) | p99 (4w) | p99 (8w) |
+| ----------- | ---------------- | ---------------- | -------- | -------- |
+| 300         | 5,832            | 7,108             | 178.7 ms | 117.4 ms |
+| 400         | 5,905            | 6,330             | 234.0 ms | 137.1 ms |
+
+Both throughput and tail latency improved meaningfully with more workers at higher concurrency.
 
 ---
 
-# 🧠 Final Takeaway
+# Note on "Incomplete" Results at c=150+ — Resolved
 
-> Performance optimizations must be driven by measured bottlenecks, not assumptions.
+Several runs above show fewer completed responses than requests sent (e.g. 4800/5000 at c=300). This was investigated as a potential dropped-request bug and is **not actually one**. Root cause: `hey -n 5000 -c 300` distributes total requests across concurrent workers, and 5000 doesn't divide evenly by 300 — `hey` rounds down to the nearest clean multiple (`300 × 16 = 4800`) and never sends the remaining 200 requests in the first place.
 
-Redis is a powerful tool, but its effectiveness depends entirely on system context.
+Confirmed by re-running with aligned numbers:
+```
+hey -n 4800 -c 300 -disable-redirects http://127.0.0.1:8000/ly1G6y
+→ 4800 / 4800 completed (100%)
+```
+
+Two other explanations were investigated and ruled out with direct evidence before finding this:
+- **Thread-pool/worker exhaustion** — ruled out: doubling workers (4→8) had zero effect on the gap count.
+- **`ulimit -n` (file descriptors)** — checked: 1024, nowhere near being challenged by 300–400 connections.
+- **`net.core.somaxconn` (kernel backlog cap)** — checked: 4096, also nowhere near being challenged.
+
+The server never dropped a single request at any concurrency level tested up to c=400.
+
+---
+
+# Final Takeaway
+
+> Performance optimizations must be driven by measured bottlenecks, not assumptions — and the measurement itself has to be verified before trusting its conclusions. Two separate investigations in this document (the Redis caching bug, and the "dropped requests" that turned out to be a benchmarking-tool rounding artifact) were cases where the numbers were collected carefully and still led to a wrong conclusion, because the thing being measured wasn't what it appeared to be.
