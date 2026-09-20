@@ -127,14 +127,5 @@ This is a portfolio/learning project, and these gaps are known rather than accid
 - No rate limiting yet
 - No automated tests yet
 - No collision-retry on short code generation
-- Single machine, single region — no horizontal scaling or CDN layer
+- Single machine — no horizontal scaling 
 - Cold-path (uncached) throughput has not yet been isolated and benchmarked separately from cache-hit throughput
-
-## Roadmap
-
-- [ ] Cold-path benchmarking (isolate true database-only throughput)
-- [ ] Database optimization (index verification, connection pool tuning)
-- [ ] Rate limiting
-- [ ] Async click tracking / analytics (queue-based, off the hot path)
-- [ ] Basic automated tests
-- [ ] Horizontal scaling (multiple instances + load balancer)
