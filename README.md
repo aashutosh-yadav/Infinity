@@ -71,7 +71,7 @@ Full writeups of all of these, including the dead ends, are in the running proje
 
 ```bash
 git clone <repo-url>
-cd hermes
+cd Infinity 
 
 python -m venv .venv
 source .venv/bin/activate
