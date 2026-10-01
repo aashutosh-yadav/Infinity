@@ -11,6 +11,15 @@ Postgres, as long as total requests <= number of seeded codes (so vegeta
 never has to cycle back to the start of the list and re-hit an
 already-cached code).
 
+Safe to run repeatedly across sessions without clearing old data first:
+  - long_url uses a uuid4 suffix (effectively zero collision probability,
+    unlike the old i+small-random-int scheme, which could collide across
+    separate runs on the same day)
+  - short_code inserts use ON CONFLICT DO NOTHING, so a rare collision
+    against a code from an earlier run is silently skipped and
+    re-generated, instead of crashing the whole seed with
+    UniqueViolationError
+
 Usage:
     python seed_cold_data.py -n 20000 -o cold_targets.txt
 """
@@ -20,6 +29,7 @@ import asyncio
 import os
 import random
 import string
+import uuid
 
 import asyncpg
 from dotenv import load_dotenv
@@ -28,10 +38,33 @@ load_dotenv()
 
 BASE_URL = "http://127.0.0.1:8000"
 ALPHABET = string.ascii_letters + string.digits
+BATCH_SIZE = 2000  # keeps each INSERT's param count well under Postgres's limit
 
 
 def random_code(length: int = 6) -> str:
     return "".join(random.choice(ALPHABET) for _ in range(length))
+
+
+async def insert_batch(conn: asyncpg.Connection, rows: list[tuple[str, str]]) -> list[str]:
+    """
+    Inserts a batch with ON CONFLICT DO NOTHING, returning only the codes
+    that were actually new. Codes that collided with something already in
+    the table (from this run or a previous one) are silently dropped here
+    rather than crashing -- the caller tops up to the target count.
+    """
+    values_sql = ", ".join(
+        f"(${i * 2 + 1}, ${i * 2 + 2})" for i in range(len(rows))
+    )
+    params = [item for pair in rows for item in pair]
+
+    query = f"""
+        INSERT INTO url_shortener (short_code, long_url)
+        VALUES {values_sql}
+        ON CONFLICT DO NOTHING
+        RETURNING short_code
+    """
+    inserted = await conn.fetch(query, *params)
+    return [r["short_code"] for r in inserted]
 
 
 async def seed(n: int) -> list[str]:
@@ -39,27 +72,34 @@ async def seed(n: int) -> list[str]:
     if not database_url:
         raise SystemExit("DATABASE_URL not set -- same .env the app itself uses")
 
-    # asyncpg wants the bare postgresql:// scheme, not the +asyncpg
-    # SQLAlchemy variant -- this connects directly, no SQLAlchemy involved.
     dsn = database_url.replace("postgresql+asyncpg://", "postgresql://")
 
     conn = await asyncpg.connect(dsn)
     try:
-        codes = set()
-        while len(codes) < n:
-            codes.add(random_code())
-        codes = list(codes)
+        inserted_codes: list[str] = []
 
-        rows = [(code, f"https://example.com/cold-{i}-{random.randint(0, 999_999)}")
-                 for i, code in enumerate(codes)]
+        while len(inserted_codes) < n:
+            remaining = n - len(inserted_codes)
+            batch_n = min(BATCH_SIZE, remaining)
 
-        # executemany via a prepared statement -- fast bulk insert, much
-        # faster than N individual HTTP round-trips through /shorten
-        await conn.executemany(
-            "INSERT INTO url_shortener (short_code, long_url) VALUES ($1, $2)",
-            rows
-        )
-        return codes
+            # locally dedupe this batch's generated codes before even
+            # trying to insert them -- cheap, and avoids some wasted
+            # round-trips for the common case
+            candidate_codes = set()
+            while len(candidate_codes) < batch_n:
+                candidate_codes.add(random_code())
+
+            rows = [
+                (code, f"https://example.com/cold-{uuid.uuid4()}")
+                for code in candidate_codes
+            ]
+
+            newly_inserted = await insert_batch(conn, rows)
+            inserted_codes.extend(newly_inserted)
+            # anything NOT in newly_inserted collided with an existing row
+            # and gets silently retried on the next loop iteration
+
+        return inserted_codes
     finally:
         await conn.close()
 
