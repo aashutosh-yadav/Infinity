@@ -23,10 +23,18 @@ l1_cache = LRUCache(max_size=1024, ttl_seconds=60)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # replaces the old sync `models.Base.metadata.create_all(bind=engine)`
-    # -- the async engine needs this run inside an async connection.
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    # Multiple uvicorn workers boot at the same instant and all try to
+    # create the table at once -- the losers get a UniqueViolationError
+    # because the winner already created it. That's fine: the table
+    # exists either way, so treat "already exists" as success.
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+    except Exception as e:
+        if "already exists" in str(e) or "UniqueViolation" in type(e).__name__ or "duplicate key" in str(e):
+            print("table already created by another worker, continuing")
+        else:
+            raise
     yield
 
 
