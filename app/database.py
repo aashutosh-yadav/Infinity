@@ -18,12 +18,13 @@ ASYNC_DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg:/
 _is_local = "localhost" in DATABASE_URL or "127.0.0.1" in DATABASE_URL
 _connect_args = {} if _is_local else {"ssl": True}
 
-# providers hand out URLs with ?sslmode=require, which asyncpg may or may
-# not parse depending on version -- strip it and pass SSL explicitly instead
-if "sslmode" in ASYNC_DATABASE_URL:
+# providers hand out URLs with ?sslmode=require&channel_binding=require,
+# which asyncpg doesn't understand -- strip both and pass SSL explicitly
+_prefixes = ("sslmode", "channel_binding")
+if any(p in ASYNC_DATABASE_URL for p in _prefixes):
     from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
     parts = urlparse(ASYNC_DATABASE_URL)
-    query = urlencode([(k, v) for k, v in parse_qsl(parts.query) if k != "sslmode"])
+    query = urlencode([(k, v) for k, v in parse_qsl(parts.query) if k not in _prefixes])
     ASYNC_DATABASE_URL = urlunparse(parts._replace(query=query))
 
 # engine = create_async_engine(
