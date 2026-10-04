@@ -349,6 +349,188 @@ The server never dropped a single request at any concurrency level tested up to 
 
 ---
 
+# Async Rewrite + L1 In-Process Cache
+
+Everything above this section was measured on the sync (non-async) architecture. The app was then rewritten: all routes converted to `async def`, `asyncpg` replacing `psycopg2`, `redis.asyncio` replacing sync `redis`, explicit connection pool sizing added, and a new in-process LRU cache (L1) added in front of Redis (L2) — a hand-built `OrderedDict`-based cache with TTL, `asyncio.Lock`-protected.
+
+## Result, single hot key, 8 workers
+
+| Metric | Value |
+| --- | --- |
+| RPS | ~17,000–20,700 (repeated runs) |
+| Avg latency | ~5ms |
+| p99 | ~15–17ms |
+
+Roughly **2–2.5x over the best sync result** (8,300 req/sec), and this is before accounting for the fact that the old c=500 collapse no longer exists at all (see below).
+
+## Concurrency sweep, re-run on the async+L1 architecture
+
+| Concurrency | RPS | Notes |
+| --- | --- | --- |
+| 100 | 20,683 | |
+| 150 | 22,135 | |
+| 160 | 21,292 | |
+| 250 | 17,295 | |
+| 300 | 17,025 | |
+| 400 | 19,942 | |
+| 500 | 19,252 | vs. **983** on the old sync architecture at the same concurrency |
+| 1000 | 17,454 | never tested on the old architecture — it couldn't survive this far |
+| 2000 | 15,633 | |
+
+**The c=500 collapse documented earlier in this file is completely gone.** Throughput stays in the 15,000–22,000 req/sec range across the entire range tested — latency degrades gracefully (p99 climbs from ~17ms at c=100 to ~380ms at c=2000) instead of the system falling over. This is the clearest evidence in the whole project that the async rewrite fixed the actual root cause (thread-pool exhaustion) rather than just making things incrementally faster.
+
+---
+
+# Multi-Key, Realistic Traffic — Hit-Rate Visibility and a Client-Side Bottleneck
+
+Single-key benchmarking is a best case for an in-process cache. To test something closer to real traffic, a custom tool (`loadtest.py`) was built: seeds N short codes, assigns Zipf-distributed weights (a few "hot" codes get most of the traffic), fires weighted concurrent requests, and reads `/stats` before/after for real hit-rate numbers.
+
+## First result (20 keys, Zipf skew 1.2)
+
+| Metric | Value |
+| --- | --- |
+| RPS | 720 |
+| Avg latency | 130ms |
+| L1 hit rate | 98% |
+
+The hit rate was excellent. The throughput was alarming — worse than the pre-async sync version. Four theories tested in order:
+
+1. **Shared `httpx` connection pool limits** — raised limits, no change. Ruled out.
+2. **Server-side access logging** — disabled (`--no-access-log`), no meaningful change. Ruled out.
+3. **CPU contention** (client + 8 server workers, same machine) — checked `htop`, cores not pegged. Ruled out.
+4. **Shared connection-pool locking** under 100-way concurrency — gave every concurrent worker its own `httpx.AsyncClient`. **Result: 720 → 1,536 req/sec.** Real, confirmed contributor — but still far short of the server's actual ceiling.
+
+**Conclusion:** the remaining bottleneck was the Python interpreter itself generating load at high concurrency — exactly why dedicated load-testing tools are written in compiled languages. The hit-rate number stayed valid throughout; the throughput number from this tool was never comparable to `hey`/`vegeta`.
+
+---
+
+# Getting a Real Multi-Key Number — vegeta, and a Second Tooling Bug
+
+Built `gen_vegeta_targets.py`: seeds codes via the API, writes a Zipf-weighted target file for `vegeta` (which, unlike `hey`, can cycle through many URLs).
+
+First run: **100% failure, every request 404.** Investigated systematically — target file checked for corruption (clean), single hardcoded target still failed (ruled out the file), `curl` against the identical URL succeeded (proved server/data were fine), snap-sandboxing checked (installed via `go install`, not snap — ruled out), proxy env vars checked (none set — ruled out). **Root cause, found via `vegeta encode` showing the raw response:** vegeta follows redirects by default. Every seeded code points at a fake path under `https://example.com/...`; vegeta was completing the redirect out to the real site, which correctly 404'd, and reporting that as the server under test failing. Every `hey` command in this project had `-disable-redirects` set since the very first benchmark — the equivalent `-redirects=-1` flag had simply never been added to vegeta.
+
+## Final clean multi-key result (20 keys, Zipf skew 1.2)
+
+| Metric | Value |
+| --- | --- |
+| RPS | 20,399–20,683 |
+| Success | 100% |
+| Avg latency | 4.4–4.5ms |
+| p50 | 3.97–4.0ms |
+| p99 | 10–11.6ms |
+| L1 hit rate (confirmed via `/stats`) | 99.82–99.98% |
+
+The real multi-key number came back *higher* than the single-key `hey` result, not lower — realistic key spread cost nothing measurable at this scale.
+
+---
+
+# Verifying the Database Layer Directly
+
+Before investigating cold-path performance, the basics were checked rather than assumed:
+
+```sql
+\d url_shortener
+```
+Confirmed real unique B-tree indexes on both `short_code` and `long_url`.
+
+```sql
+EXPLAIN ANALYZE SELECT long_url FROM url_shortener WHERE short_code = 'ly1G6y';
+```
+Confirmed `Index Scan using ix_url_shortener_short_code`, 0.035ms execution time, 2 buffer hits — no sequential scan, no query-plan problem. The database layer was never the bottleneck.
+
+---
+
+# Cold-Path Benchmarking — True Cache-Miss Throughput
+
+Every number above reflects hot (cache-hit) traffic. To measure the honest worst case, `seed_cold_data.py` bulk-inserts thousands of never-before-seen short codes **directly into Postgres**, bypassing the API, guaranteeing every benchmarked request is a genuine cache miss (as long as total requests stay under the seeded count).
+
+## First cold-path run (pool_size=20, max_overflow=20 — unchanged since the sync era)
+
+| Metric | Value |
+| --- | --- |
+| RPS | 1,510–1,693 |
+| Avg latency | 59ms |
+| Success | 91.6% — **712 requests failed with HTTP 500** |
+
+A cold miss failing outright was new — every earlier investigation in this project was about speed, not correctness breaking under load. The uvicorn traceback gave the cause directly:
+
+```
+asyncpg.exceptions.TooManyConnectionsError: remaining connection slots are
+reserved for roles with the SUPERUSER attribute
+```
+
+**Root cause:** `pool_size=20 + max_overflow=20 = 40` connections per worker × 8 workers = **320 possible simultaneous connections**, against Postgres's `max_connections` default of 100 (confirmed via `SHOW max_connections`). Cache-hit traffic never touches the connection pool at all, so no amount of hot-path load testing — however extreme — could have surfaced this. Cold-path traffic was the first in the project's history to actually stress real DB connections.
+
+## Fix
+
+- App pool tightened to `pool_size=8, max_overflow=4` (8 workers × 12 = 96, safely under 100)
+- Postgres's own `max_connections` raised to 200 (`ALTER SYSTEM SET max_connections = 200;` + restart), for additional headroom
+
+**Process note:** the plan had been to check `pg_stat_activity` first to confirm what was actually holding all the connections, before changing anything. The Postgres restart happened before that check ran, clearing the evidence that would have confirmed the theory directly. The fix worked, but went in without that confirmation — worth being honest about rather than claiming a fully rigorous process at every step.
+
+## First post-fix result — contaminated, caught and discarded
+
+A re-test looked dramatic (throughput ~7,400 req/sec, errors down to 3.4%), but the request count (36,990) was nearly double the 20,000 seeded codes — vegeta had cycled back and started hitting already-cache-warmed codes partway through. **Discarded rather than reported.**
+
+## Clean post-fix result (reseeded to 50,000, capped under that count)
+
+| Metric | Value |
+| --- | --- |
+| RPS | 2,415 |
+| Avg latency | 41ms |
+| Success | 99.89% — 8 residual errors |
+
+Success rate went from 91.6% to 99.89% — the connection-exhaustion failure mode was essentially solved. 8 unexplained errors remained at this point.
+
+## Follow-up sessions — confirming the fix holds, and a second bug found and fixed
+
+Repeated the same test across several later sessions, each with a fresh reseed:
+
+| Run | RPS | Success |
+| --- | --- | --- |
+| Clean run, 10,608 requests | 3,508–3,537 | **100%, zero errors** |
+| Repeat, 16,885 requests | 3,360–3,377 | **100%** |
+| Repeat, 27,943 requests | 6,917–6,945 | **100%** |
+| Repeat, 17,254 requests | 3,434–3,450 | **100%** |
+| Repeat (after a seeding-script fix, see below), 18,658 requests | 3,709–3,732 | **100%** |
+
+**Five consecutive clean runs, zero errors in every one, across multiple separate sessions.** The earlier 8 residual errors did not recur once. The connection-pool fix is now considered confirmed, not provisional.
+
+### A second bug, found while re-running these confirmations
+
+After several repeated seeding runs in one day, `seed_cold_data.py` began failing with `UniqueViolationError` — both on `long_url` (the script's synthetic URLs used a small index + narrow random range that could collide across separate runs) and eventually on `short_code` (accumulated rows across many runs slowly raised collision odds against the 56.8-billion-combination random code space). Root cause: the script had no way to avoid colliding with data left behind by its own earlier runs.
+
+**Fix:** `long_url` now uses a `uuid4` suffix (effectively zero collision probability regardless of how many times the script runs), and inserts use `INSERT ... ON CONFLICT DO NOTHING RETURNING short_code`, batched to stay under Postgres's parameter limits — a rare collision is now silently skipped and regenerated instead of crashing the whole seed.
+
+## Final, confirmed hot-vs-cold comparison
+
+| Path | Throughput | Avg latency | Success |
+| --- | --- | --- | --- |
+| Hot (cache hit, multi-key, Zipf) | ~20,400 req/sec | ~4.5ms | 100% |
+| Cold (guaranteed miss, direct to Postgres) | ~3,500–3,700 req/sec | ~27–29ms | 100%, confirmed across 5 repeated runs |
+
+Roughly a **5.5–6x gap** between hot and cold paths — real, measured, and now backed by repeated zero-error confirmation rather than a single run.
+
+---
+
+# L1 Cache TTL — Verified With Direct Evidence
+
+A controlled test (`test_l1_ttl.py`) was built to prove the two-tier TTL design (L1=60s, L2=3600s) actually behaves as intended, rather than trusting the code's apparent correctness. **Must run against `--workers 1`** — with multiple workers, each has a separate L1 cache and `/stats` counters, and a request could land on any of them, making the result meaningless.
+
+Sequence and result:
+
+| Step | Expected | Got |
+| --- | --- | --- |
+| First-ever request for a fresh code | `db_hits: 1` | `db_hits: 1` ✅ |
+| Immediate re-request | `l1_hits: 1` | `l1_hits: 1` ✅ |
+| Request after waiting past L1's 60s TTL | `l2_hits: 1` (not a DB hit) | `l2_hits: 1` ✅ |
+| Immediate re-request after that | `l1_hits: 1` (re-populated) | `l1_hits: 1` ✅ |
+
+Exact match on every step. Confirms: a fresh code goes to Postgres once; stays warm in L1 while fresh; correctly falls back to L2 (not the database) once L1's shorter TTL expires, since L2's longer TTL still had it; and immediately re-populates L1 on that L2 hit. Nothing fell through to the database on the second round — exactly the behavior the differing TTLs were designed to produce.
+
+---
+
 # Final Takeaway
 
-> Performance optimizations must be driven by measured bottlenecks, not assumptions — and the measurement itself has to be verified before trusting its conclusions. Two separate investigations in this document (the Redis caching bug, and the "dropped requests" that turned out to be a benchmarking-tool rounding artifact) were cases where the numbers were collected carefully and still led to a wrong conclusion, because the thing being measured wasn't what it appeared to be.
+> Performance optimizations must be driven by measured bottlenecks, not assumptions — and the measurement itself has to be verified before trusting its conclusions. Several investigations in this document (the Redis caching bug, the "dropped requests" that turned out to be a benchmarking-tool rounding artifact, the vegeta redirect-following bug) were cases where the numbers were collected carefully and still led to a wrong conclusion, because the thing being measured wasn't what it appeared to be. The cold-path investigation added a further lesson: even a confirmed fix deserves repeated verification, not a single clean run — the connection-pool fix wasn't treated as "done" until it held up across five separate, independently-seeded benchmark sessions.

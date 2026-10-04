@@ -13,6 +13,19 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 # change the DATABASE_URL you already have.
 ASYNC_DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
 
+# Managed Postgres providers (Neon, Render, Supabase) require SSL. Local
+# dev on localhost doesn't have SSL, so only enable it for remote hosts.
+_is_local = "localhost" in DATABASE_URL or "127.0.0.1" in DATABASE_URL
+_connect_args = {} if _is_local else {"ssl": True}
+
+# providers hand out URLs with ?sslmode=require, which asyncpg may or may
+# not parse depending on version -- strip it and pass SSL explicitly instead
+if "sslmode" in ASYNC_DATABASE_URL:
+    from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
+    parts = urlparse(ASYNC_DATABASE_URL)
+    query = urlencode([(k, v) for k, v in parse_qsl(parts.query) if k != "sslmode"])
+    ASYNC_DATABASE_URL = urlunparse(parts._replace(query=query))
+
 # engine = create_async_engine(
 #     ASYNC_DATABASE_URL,
 #     pool_size=20,       # was unset (SQLAlchemy default: 5) -- explicit now
@@ -20,6 +33,7 @@ ASYNC_DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg:/
 # )
 engine = create_async_engine(
     ASYNC_DATABASE_URL,
+    connect_args=_connect_args,
     # Postgres's max_connections defaults to 100 (confirmed via `SHOW
     # max_connections`), and EVERY worker process gets its own separate
     # pool -- these numbers multiply by worker count, they don't share.

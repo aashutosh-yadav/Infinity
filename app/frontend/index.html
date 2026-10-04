@@ -202,12 +202,16 @@
 
   <section>
     <p class="label">run a live benchmark — right now, against this server</p>
-    <p class="desc">This fires real concurrent requests from your browser at the running backend and measures actual latency as it happens. No canned numbers.</p>
+    <p class="desc">This fires real concurrent requests from your browser at the running backend and measures actual latency as it happens. No canned numbers. Hot path reuses one warm short code (cache hit). Cold path seeds fresh codes straight into Postgres and requests each one exactly once, so every request is a guaranteed L1 + L2 miss straight to the database.</p>
 
     <div class="bench-controls">
       <select id="presetSelect">
         <option value="quick">Quick — 300 requests, 15 concurrent</option>
         <option value="heavy">Heavy — 1000 requests, 30 concurrent</option>
+      </select>
+      <select id="pathSelect">
+        <option value="hot">Hot path — cache hit</option>
+        <option value="cold">Cold path — straight to Postgres</option>
       </select>
       <button id="runBtn" onclick="startBenchmark()">Run Benchmark</button>
       <button id="stopBtn" class="secondary stop" onclick="stopBenchmark()" style="display:none">Stop</button>
@@ -326,6 +330,24 @@
     if (!demoShortCode) { await ensureDemoLink(); if (!demoShortCode) { alert("Server not reachable yet -- try again in a moment."); return; } }
 
     const preset = PRESETS[document.getElementById("presetSelect").value];
+    const path = document.getElementById("pathSelect").value;
+
+    let targetCodes = null; // cold mode: one fresh, never-requested code per request
+    if (path === "cold") {
+      try {
+        const res = await fetch(`/seed_cold?n=${preset.total}`, { method: "POST" });
+        const data = await res.json();
+        targetCodes = data.codes;
+      } catch (e) {
+        alert("Could not seed cold-path data — is the server running?");
+        benchRunning = false;
+        setHeaderStatus(false);
+        document.getElementById("runBtn").style.display = "inline-block";
+        document.getElementById("stopBtn").style.display = "none";
+        return;
+      }
+    }
+
     benchRunning = true;
     cancelRequested = false;
 
@@ -378,8 +400,8 @@
 
     const uiInterval = setInterval(updateLiveReadout, 150);
 
-    async function worker(count) {
-      for (let i = 0; i < count; i++) {
+    async function worker(codes) {
+      for (const code of codes) {
         if (cancelRequested) return;
         const t0 = performance.now();
         try {
@@ -387,7 +409,7 @@
           // would follow the 307 out to the real destination URL, which
           // is exactly the bug that broke an earlier load-testing tool
           // in this project. We only want to measure this server's hop.
-          await fetch("/" + demoShortCode, { redirect: "manual", cache: "no-store" });
+          await fetch("/" + code, { redirect: "manual", cache: "no-store" });
           const t1 = performance.now();
           const lat = t1 - t0;
           latencies.push(lat);
@@ -401,8 +423,19 @@
       }
     }
 
+    // hot: every worker hammers the same warm code, round-robin.
+    // cold: codes are split into disjoint slices so no code is ever
+    // requested twice -- every request is a real cache miss.
     const perWorker = Math.floor(preset.total / preset.concurrency);
-    const workers = Array.from({ length: preset.concurrency }, () => worker(perWorker));
+    let workerCodeLists;
+    if (path === "cold") {
+      workerCodeLists = Array.from({ length: preset.concurrency }, (_, i) =>
+        targetCodes.slice(i * perWorker, (i + 1) * perWorker));
+    } else {
+      workerCodeLists = Array.from({ length: preset.concurrency }, () =>
+        Array.from({ length: perWorker }, () => demoShortCode));
+    }
+    const workers = workerCodeLists.map(codes => worker(codes));
     await Promise.all(workers);
 
     clearInterval(uiInterval);

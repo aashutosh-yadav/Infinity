@@ -1,7 +1,9 @@
 from contextlib import asynccontextmanager
+import uuid
 
 from fastapi import FastAPI, Depends, HTTPException
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi.responses import RedirectResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -57,6 +59,26 @@ def serve_frontend():
 @app.get("/stats")
 def get_stats():
     return stats.as_dict()
+
+# Seed N brand-new short codes straight into Postgres (bypassing the API,
+# so /stats counters and the caches stay untouched). Every code has never
+# been requested before, so hitting each one exactly once is a guaranteed
+# cold-path measurement: L1 miss, L2 miss, straight to the DB.
+@app.post("/seed_cold")
+async def seed_cold(n: int = 300):
+    codes = set()
+    while len(codes) < n:
+        codes.add(utils.generate_short_code())
+    rows = [
+        {"short_code": c, "long_url": f"https://example.com/cold-{uuid.uuid4()}"}
+        for c in codes
+    ]
+    async with SessionLocal() as db:
+        stmt = pg_insert(models.URL).values(rows).on_conflict_do_nothing()
+        await db.execute(stmt)
+        await db.commit()
+    return {"codes": list(codes), "count": len(codes)}
+
 
 # Create short URL
 @app.post("/shorten", response_model=schemas.URLResponse)
