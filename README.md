@@ -83,9 +83,8 @@ The L1 TTL (60s) is deliberately shorter than Redis's (3600s): L1 is a "thin, fa
 ### Hot path vs cold path (what the benchmark tool measures)
 
 ```
-HOT (cache hit):   client ──► L1 ──► redirect                       ~4.5ms, ~20k req/s
-COLD (cache miss): client ──► L1 ✗ ──► Redis ✗ ──► Postgres ──► warm L1+L2 ──► redirect
-                                                                        ~28ms, ~3.5k req/s
+HOT:   client → L1 → redirect                              (~4.5ms, ~20k req/s)
+COLD:  client → L1✗ → Redis✗ → Postgres → warm L1+L2 → redirect   (~28ms, ~3.5k req/s)
 ```
 
 Cold path is only honest if every request is a genuine miss — that requires codes nobody has ever requested. That's what `seed_cold_data.py` (for `vegeta`) and `POST /seed_cold` (for the in-browser tool) exist for: they insert never-before-seen codes directly into Postgres, bypassing the caches, so each one is guaranteed cold on first hit. Keep total requests under the number of seeded codes, or the client cycles back and starts measuring a warm path again.
