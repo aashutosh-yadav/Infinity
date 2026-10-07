@@ -19,7 +19,7 @@ Most URL shortener tutorials stop at "map a short code to a long URL." This proj
 ## Tech stack
 
 | Layer | Technology |
-|---|---|
+| --- | --- |
 | API | FastAPI (async) |
 | Database | PostgreSQL, via async SQLAlchemy (`asyncpg`) |
 | Cache (L2) | Redis, via `redis.asyncio` |
@@ -73,7 +73,7 @@ Every mutating call also **populates both cache levels** (lazy/write-through-on-
 ### Why three levels exist
 
 | Level | Where it lives | Latency | Scope | Why it's there |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | L1 | In-process Python dict LRU | ~microseconds | One worker process | Skips the network entirely for the hottest codes |
 | L2 | Redis | ~0.2ms local / a few ms remote | Shared across all workers | One warm copy serves every worker, including ones whose L1 is still cold |
 | Postgres | Managed database | Single-digit ms | Source of truth | Durability; also what a genuine cache miss must fall back to |
@@ -123,7 +123,7 @@ Browser / curl / hey / vegeta
 Benchmarked on a personal laptop — Intel i5-1155G7 (11th Gen, 8 threads @ 2.5GHz), ~6.9GB usable RAM, NVMe SSD — actively running a full desktop session throughout testing, not a dedicated or isolated server. All numbers are from real `hey`/`vegeta` runs against a running instance. Full methodology, every intermediate result, and every wrong turn are in [`BENCHMARK.md`](./BENCHMARK.md).
 
 | Path | Throughput | Avg latency | Success rate |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | **Hot** (cache hit, realistic multi-key traffic) | ~20,400 req/sec | ~4.5ms | 100% |
 | **Cold** (guaranteed cache miss, straight to PostgreSQL) | ~3,500 req/sec | ~28ms | 100% |
 
@@ -164,6 +164,7 @@ pip install -r requirements.txt
 ```
 
 Set up PostgreSQL and Redis locally, then create `.env`:
+
 ```
 DATABASE_URL=postgresql://<user>:<password>@localhost:5432/<dbname>
 # optional for local dev; defaults to redis://localhost:6379/0
@@ -171,6 +172,7 @@ REDIS_URL=redis://localhost:6379/0
 ```
 
 Run it:
+
 ```bash
 uvicorn app.main:app --workers 8
 ```
@@ -231,14 +233,3 @@ This is a portfolio/learning project, and these gaps are known rather than accid
 - Single machine, single region — no horizontal scaling or CDN layer
 - A small number of residual errors (well under 1% of requests) appeared during early cold-path load testing and have not yet been fully root-caused, though the dominant failure mode (database connection exhaustion) is confirmed fixed
 - L1 cache TTL behavior has not been specifically load-tested at the expiry boundary
-
-## Roadmap
-
-- [ ] Resolve remaining residual cold-path errors
-- [ ] PgBouncer (or similar) in front of PostgreSQL, as the more scalable answer to connection-limit tuning than hand-sizing the app's pool
-- [ ] Rate limiting
-- [ ] Async click tracking / analytics (queue-based, off the hot path)
-- [ ] Basic automated tests
-- [ ] Collision-retry on short code generation
-- [ ] Horizontal scaling (multiple instances + load balancer)
-- [ ] Make Docker Compose the default local dev path
