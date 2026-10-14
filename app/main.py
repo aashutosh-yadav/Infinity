@@ -19,15 +19,28 @@ l1_cache = LRUCache(max_size=1024, ttl_seconds=60)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # ---------- STARTUP ----------
     try:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
-    except Exception as e:
-        if "already exists" in str(e) or "UniqueViolation" in type(e).__name__ or "duplicate key" in str(e):
-            print("table already created by another worker, continuing")
+    except Exception as error:
+        message = str(error)
+
+        # If two workers start at the same time, one creates the table first.
+        # The other then gets an "already exists" error, which is harmless.
+        already_created = "already exists" in message or "duplicate key" in message
+
+        if already_created:
+            print("Tables were already created by another worker. Continuing.")
         else:
+            # Any other error is a real problem, so stop the startup.
             raise
+
+    # ---------- APP RUNS ----------
     yield
+
+    # ---------- SHUTDOWN ----------
+    # Nothing to clean up.
 
 
 app = FastAPI(lifespan=lifespan)
