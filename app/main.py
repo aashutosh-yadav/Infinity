@@ -14,19 +14,11 @@ from .redis_client import redis_client
 from .l1_cache import LRUCache
 
 from .stats import stats
-# L1 cache: in-process, checked before Redis (L2). TTL kept shorter than
-# Redis's so a change made elsewhere doesn't stay stale in-process for too
-# long -- L1 is meant to be a thin, fast skim off the top, not the source
-# of truth for freshness.
 l1_cache = LRUCache(max_size=1024, ttl_seconds=60)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Multiple uvicorn workers boot at the same instant and all try to
-    # create the table at once -- the losers get a UniqueViolationError
-    # because the winner already created it. That's fine: the table
-    # exists either way, so treat "already exists" as success.
     try:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
@@ -61,17 +53,10 @@ async def get_db():
 def serve_frontend():
     return FileResponse("app/frontend/index.html")
 
-# Cache hit-rate visibility. NOTE: with multiple workers, this only
-# reflects the one worker process that handles this request -- see the
-# caveat in stats.py.
 @app.get("/stats")
 def get_stats():
     return stats.as_dict()
 
-# Seed N brand-new short codes straight into Postgres (bypassing the API,
-# so /stats counters and the caches stay untouched). Every code has never
-# been requested before, so hitting each one exactly once is a guaranteed
-# cold-path measurement: L1 miss, L2 miss, straight to the DB.
 @app.post("/seed_cold")
 async def seed_cold(n: int = 300):
     codes = set()
