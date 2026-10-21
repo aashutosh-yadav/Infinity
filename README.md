@@ -120,7 +120,7 @@ Browser / curl / hey / vegeta
 
 ## Performance
 
-Benchmarked on a personal laptop — Intel i5-1155G7 (11th Gen, 8 threads @ 2.5GHz), ~6.9GB usable RAM, NVMe SSD — actively running a full desktop session throughout testing, not a dedicated or isolated server. All numbers are from real `hey`/`vegeta` runs against a running instance. Full methodology, every intermediate result, and every wrong turn are in [`BENCHMARK.md`](./BENCHMARK.md).
+Benchmarked on a personal laptop — Intel i5-1155G7 (11th Gen, 8 threads @ 2.5GHz), ~6.9GB usable RAM, NVMe SSD — actively running a full desktop session throughout testing, not a dedicated or isolated server. All numbers are from real `hey`/`vegeta` runs against a running instance. Full methodology, every intermediate result, and every wrong turn are in [`BENCHMARK.md`](./testing/BENCHMARK.md).
 
 | Path | Throughput | Avg latency | Success rate |
 | --- | --- | --- | --- |
@@ -188,15 +188,18 @@ A `Dockerfile` also exists and is what the Render deployment builds from (`docke
 hey -n 5000 -c 100 -disable-redirects http://127.0.0.1:8000/<short_code>
 
 # Multi-key, realistic (Zipf-weighted) hot-path traffic, with cache hit-rate visibility
-python loadtest.py -n 5000 -c 100 -k 20 --skew 1.2
+python testing/loadtest.py -n 5000 -c 100 -k 20 --skew 1.2
+
+# Same load, via Locust (a library) -- lower tail latency + built-in p50/p95/p99
+locust -f testing/locustfile.py --headless -u 100 -r 100 -t 15s --only-summary --num-keys 20 --skew 1.2
 
 # Multi-key hot-path, at full (non-Python-bottlenecked) throughput
-python gen_vegeta_targets.py -k 20 --skew 1.2 -o targets.txt
-vegeta attack -targets=targets.txt -rate=0 -max-workers=100 -redirects=-1 -duration=10s | vegeta report
+python testing/gen_vegeta_targets.py -k 20 --skew 1.2 -o testing/targets.txt
+vegeta attack -targets=testing/targets.txt -rate=0 -max-workers=100 -redirects=-1 -duration=10s | vegeta report
 
 # True cold-path throughput (guaranteed cache misses, direct to Postgres)
-python seed_cold_data.py -n 50000 -o cold_targets.txt
-vegeta attack -targets=cold_targets.txt -rate=0 -max-workers=100 -redirects=-1 -duration=5s | vegeta report
+python testing/seed_cold_data.py -n 50000 -o testing/cold_targets.txt
+vegeta attack -targets=testing/cold_targets.txt -rate=0 -max-workers=100 -redirects=-1 -duration=5s | vegeta report
 ```
 
 **Important for cold-path testing:** keep the attack's total request count under the number of codes you seeded, or `vegeta` will cycle back and start hitting already-cached codes — no longer a valid cold-path measurement. `seed_cold_data.py` prints a reminder of this every time it runs.
@@ -214,10 +217,14 @@ app/
   stats.py           — cache hit-rate counters
   utils.py            — short code generation
   frontend/index.html — live dashboard + in-browser benchmark tool
-loadtest.py              — custom async multi-key load tester (Zipf-weighted); useful for hit-rate visibility, bottlenecked by its own Python overhead for raw throughput
-gen_vegeta_targets.py    — seeds short codes via the API, writes a Zipf-weighted vegeta target file
-seed_cold_data.py        — bulk-inserts unique short codes directly into Postgres and writes a vegeta target file guaranteed to produce cache misses
-BENCHMARK.md             — full benchmark history and methodology, including superseded results kept for the record
+testing/
+  loadtest.py            — custom async multi-key load tester (Zipf-weighted); useful for hit-rate visibility, bottlenecked by its own Python overhead for raw throughput
+  locustfile.py          — Locust-based load tester (library replacement for loadtest.py); built-in p50/p95/p99 and a tighter tail
+  gen_vegeta_targets.py  — seeds short codes via the API, writes a Zipf-weighted vegeta target file
+  seed_cold_data.py      — bulk-inserts unique short codes directly into Postgres and writes a vegeta target file guaranteed to produce cache misses
+  test_l1_ttl.py         — proves the L1/L2 TTL behaviour end-to-end (must run with --workers 1)
+  BENCHMARK.md           — full benchmark history and methodology, including superseded results kept for the record
+  targets.txt / cold_targets.txt / results.bin — generated benchmark inputs/results
 Dockerfile             — production image (what Render builds/deploys)
 ARTICLE.md             — full long-form writeup, kept in sync with the code
 ```
