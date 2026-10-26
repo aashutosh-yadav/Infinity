@@ -14,6 +14,7 @@ from .redis_client import redis_client
 from .l1_cache import LRUCache
 
 from .stats import stats
+
 l1_cache = LRUCache(max_size=1024, ttl_seconds=60)
 
 
