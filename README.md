@@ -29,16 +29,28 @@ Most URL shortener tutorials stop at "map a short code to a long URL." This proj
 ## Architecture
 
 ```
-Client
-  │
-  ▼
-FastAPI (async, multiple workers)
-  │
-  ├─► L1 cache (in-process LRU, per worker) ─── hit? return immediately
-  │
-  ├─► L2 cache (Redis) ─── hit? promote to L1, return
-  │
-  └─► PostgreSQL (source of truth) ─── populate L1 + L2, return
+                                client
+                                   │  HTTP
+                                   ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│  FastAPI · async · uvicorn workers                                   │
+│  each worker owns its own L1 and /stats counters                     │
+└──────────────────────────────────┬───────────────────────────────────┘
+                                   │
+                                   ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│  L1 cache · in-process LRU · per worker · TTL 60 s                   │
+└──────────────────────────────────┬───────────────────────────────────┘
+                                   │  miss
+                                   ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│  L2 cache · Redis · shared across all workers · TTL 3600 s           │
+└──────────────────────────────────┬───────────────────────────────────┘
+                                   │  miss
+                                   ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│  PostgreSQL · source of truth                                        │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
 **Note on workers:** the app runs with multiple `uvicorn` worker processes. Each worker is a separate OS process with its **own** L1 cache and its **own** `/stats` counters — they are not shared. `/stats` reflects whichever single worker answered that particular request, not a true sum across all workers.
@@ -48,24 +60,31 @@ FastAPI (async, multiple workers)
 ### Request lifecycle (`GET /{short_code}`)
 
 ```
-Client
-  │
-  ▼
-┌──────────────────────────────────────────────────┐
-│ FastAPI (async, multiple uvicorn workers)         │
-│                                                   │
-│  1. L1 lookup (in-process LRU, per worker, TTL)  │──── hit ──► 307 redirect  (stats: l1_hits)
-│         │ miss                                    │
-│         ▼                                         │
-│  2. L2 lookup (Redis, TTL 3600s)                 │──── hit ──► promote into L1 ──► 307 redirect
-│         │ miss                                    │                             (stats: l2_hits)
-│         ▼                                         │
-│  3. PostgreSQL (source of truth, indexed)        │
-│         │ row found?                              │──── hit ──► populate L1 + L2 ──► 307 redirect
-│         │ no                                      │                             (stats: db_hits)
-│         ▼                                         │
-│     404 Not Found                                │             (stats: misses → not_found)
-└──────────────────────────────────────────────────┘
+                 GET /{short_code}
+                        │
+                        ▼
+  ┌─────────────────────────────────────────┐             ┌───────────────────────────┐
+  │  1 · L1 — in-process LRU                │── hit ─────►│  307 redirect             │
+  │  per worker · TTL 60 s                  │             │  stats: l1_hits           │
+  └────────────────────┬────────────────────┘             └───────────────────────────┘
+                       │  miss
+                       ▼
+  ┌─────────────────────────────────────────┐             ┌───────────────────────────┐
+  │  2 · L2 — Redis                         │── hit ─────►│  promote into L1          │
+  │  shared across workers · 3600 s         │             │  307 · stats: l2_hits     │
+  └────────────────────┬────────────────────┘             └───────────────────────────┘
+                       │  miss
+                       ▼
+  ┌─────────────────────────────────────────┐             ┌───────────────────────────┐
+  │  3 · PostgreSQL                         │── found ───►│  populate L1 + L2         │
+  │  source of truth · indexed              │             │  307 · stats: db_hits     │
+  └────────────────────┬────────────────────┘             └───────────────────────────┘
+                       │  not found
+                       ▼
+         ┌───────────────────────────┐
+         │  404 Not Found            │
+         │  stats: not_found         │
+         └───────────────────────────┘
 ```
 
 Every mutating call also **populates both cache levels** (lazy/write-through-on-read), so a cold miss warms L2 and L1 for all subsequent requests of the same code.
@@ -83,8 +102,21 @@ The L1 TTL (60s) is deliberately shorter than Redis's (3600s): L1 is a "thin, fa
 ### Hot path vs cold path (what the benchmark tool measures)
 
 ```
-HOT:   client → L1 → redirect                              (~4.5ms, ~20k req/s)
-COLD:  client → L1✗ → Redis✗ → Postgres → warm L1+L2 → redirect   (~28ms, ~3.5k req/s)
+┌─ HOT PATH ───────────────────────────────────────────────────────────┐
+│                                                                      │
+│  client ──► L1 hit ──► 307 redirect                                 │
+│                                                                      │
+│  ~4.5 ms avg · ~20,400 req/s · no Redis hop, no DB query             │
+│                                                                      │
+└──────────────────────────────────────────────────────────────────────┘
+
+┌─ COLD PATH ──────────────────────────────────────────────────────────┐
+│                                                                      │
+│  client ──► L1 miss ──► L2 miss ──► Postgres ──► warm L1+L2 ──► 307 │
+│                                                                      │
+│  ~28 ms avg · ~3,500 req/s · one DB round-trip per request           │
+│                                                                      │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
 Cold path is only honest if every request is a genuine miss — that requires codes nobody has ever requested. That's what `seed_cold_data.py` (for `vegeta`) and `POST /seed_cold` (for the in-browser tool) exist for: they insert never-before-seen codes directly into Postgres, bypassing the caches, so each one is guaranteed cold on first hit. Keep total requests under the number of seeded codes, or the client cycles back and starts measuring a warm path again.
@@ -92,19 +124,21 @@ Cold path is only honest if every request is a genuine miss — that requires co
 ### Deployment topology (production, free tier)
 
 ```
-Browser / curl / hey / vegeta
-        │
-        ▼
-┌─────────────────────┐       ┌──────────────┐
-│   Render (app)       │       │              │
-│  uvicorn × 2 workers │──────►│ Neon          │── source of truth (Postgres)
-│  FastAPI + L1 cache  │       │  (managed)    │     (SSL required for remote)
-└─────────┬───────────┘       └──────────────┘
-          │
-          ▼
-┌─────────────────────┐
-│ Upstash (Redis)      │── L2 cache, rediss:// (TLS)
-└─────────────────────┘
+  browser · curl · hey · vegeta
+                │  HTTPS
+                ▼
+  ┌───────────────────────────┐       ┌──────────────────────────┐
+  │  Render · uvicorn × 2     │──────►│  Neon PostgreSQL         │
+  │  FastAPI + L1 per worker  │       │  source of truth · TLS   │
+  └───────────────────────────┘       └──────────────────────────┘
+                │
+                ▼
+  ┌───────────────────────────┐
+  │  Upstash Redis · L2       │
+  │  rediss:// (TLS) · shared │
+  └───────────────────────────┘
+
+  all three services co-located in AWS us-east-2 (Ohio)
 ```
 
 - All three services run in the **same region (AWS US East 2, Ohio)** so inter-service hops stay cheap.
