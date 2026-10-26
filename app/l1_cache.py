@@ -1,14 +1,5 @@
 """
 A small in-process LRU cache with per-entry TTL.
-
-This sits in front of Redis as an L1 cache: the hottest short codes get
-served straight from app memory, skipping the network round-trip to Redis
-entirely. Real-world URL shortener traffic is heavily power-law distributed
-(a small fraction of links get most of the clicks), so this is where a lot
-of the cheap wins for a redirect-heavy workload actually live.
-
-Built by hand rather than pulling in a library (e.g. cachetools) since the
-point of this project is understanding the mechanism, not just having it.
 """
 
 import time
